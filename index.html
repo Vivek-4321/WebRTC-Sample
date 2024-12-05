@@ -1,0 +1,345 @@
+<!-- <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebRTC Video Chat</title>
+    <style>
+        video { 
+            width: 480px; 
+            max-width: 100%; 
+            margin: 10px; 
+            background: #2c3e50; 
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        #callButton, #hangupButton {
+            margin: 10px;
+            padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebRTC Video Chat</h1>
+        <input type="text" id="username" placeholder="Enter your username">
+        <input type="text" id="targetUser" placeholder="Enter target username">
+        <button id="connectButton">Connect</button>
+        <video id="localVideo" autoplay playsinline></video>
+        <video id="remoteVideo" autoplay playsinline></video>
+        <button id="callButton" disabled>Start Call</button>
+        <button id="hangupButton" disabled>Hang Up</button>
+    </div>
+
+    <script>
+        const socket = new WebSocket('ws://localhost:3000');
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const connectButton = document.getElementById('connectButton');
+        const callButton = document.getElementById('callButton');
+        const hangupButton = document.getElementById('hangupButton');
+        const usernameInput = document.getElementById('username');
+        const targetUserInput = document.getElementById('targetUser');
+
+        let localStream;
+        let peerConnection;
+        let username;
+        let targetUser;
+
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        };
+
+        connectButton.addEventListener('click', async () => {
+            username = usernameInput.value;
+            targetUser = targetUserInput.value;
+
+            // Request camera and microphone access
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: true, 
+                    audio: true 
+                });
+                localVideo.srcObject = localStream;
+
+                // Send username to server
+                socket.send(JSON.stringify({
+                    type: 'register',
+                    username: username
+                }));
+
+                connectButton.disabled = true;
+                callButton.disabled = false;
+            } catch (error) {
+                console.error('Error accessing media devices:', error);
+            }
+        });
+
+        callButton.addEventListener('click', createOffer);
+        hangupButton.addEventListener('click', hangUp);
+
+        async function createOffer() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            // Add local stream tracks to peer connection
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            // Handle incoming tracks
+            peerConnection.ontrack = (event) => {
+                remoteVideo.srcObject = event.streams[0];
+            };
+
+            // Handle ICE candidates
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.send(JSON.stringify({
+                        type: 'ice-candidate',
+                        candidate: event.candidate,
+                        from: username,
+                        to: targetUser
+                    }));
+                }
+            };
+
+            // Create offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            // Send offer to server
+            socket.send(JSON.stringify({
+                type: 'offer',
+                offer: offer,
+                from: username,
+                to: targetUser
+            }));
+
+            callButton.disabled = true;
+            hangupButton.disabled = false;
+        }
+
+        async function hangUp() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            socket.send(JSON.stringify({
+                type: 'hangup',
+                from: username,
+                to: targetUser
+            }));
+
+            localVideo.srcObject.getTracks().forEach(track => track.stop());
+            remoteVideo.srcObject = null;
+            callButton.disabled = false;
+            hangupButton.disabled = true;
+        }
+
+        socket.onmessage = async (event) => {
+            const message = JSON.parse(event.data);
+
+            switch (message.type) {
+                case 'offer':
+                    if (message.to === username) {
+                        peerConnection = new RTCPeerConnection(configuration);
+
+                        // Add local stream tracks to peer connection
+                        localStream.getTracks().forEach(track => {
+                            peerConnection.addTrack(track, localStream);
+                        });
+
+                        // Handle incoming tracks
+                        peerConnection.ontrack = (event) => {
+                            remoteVideo.srcObject = event.streams[0];
+                        };
+
+                        // Handle ICE candidates
+                        peerConnection.onicecandidate = (event) => {
+                            if (event.candidate) {
+                                socket.send(JSON.stringify({
+                                    type: 'ice-candidate',
+                                    candidate: event.candidate,
+                                    from: username,
+                                    to: message.from
+                                }));
+                            }
+                        };
+
+                        // Set remote description
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+
+                        // Create answer
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+
+                        // Send answer to server
+                        socket.send(JSON.stringify({
+                            type: 'answer',
+                            answer: answer,
+                            from: username,
+                            to: message.from
+                        }));
+
+                        callButton.disabled = true;
+                        hangupButton.disabled = false;
+                    }
+                    break;
+
+                case 'answer':
+                    if (message.to === username) {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+                    }
+                    break;
+
+                case 'ice-candidate':
+                    if (message.to === username) {
+                        try {
+                            await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                        } catch (error) {
+                            console.error('Error adding ICE candidate:', error);
+                        }
+                    }
+                    break;
+
+                case 'hangup':
+                    if (message.to === username) {
+                        if (peerConnection) {
+                            peerConnection.close();
+                            peerConnection = null;
+                        }
+                        remoteVideo.srcObject = null;
+                        callButton.disabled = false;
+                        hangupButton.disabled = true;
+                    }
+                    break;
+            }
+        };
+    </script>
+</body>
+</html> -->
+
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC SFU</title>
+    <style>
+        .video-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 10px;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+    </style>
+</head>
+<body>
+    <div class="video-container" id="videoContainer">
+        <video id="localVideo" autoplay playsinline muted></video>
+    </div>
+
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        const videoContainer = document.getElementById('videoContainer');
+        const localVideo = document.getElementById('localVideo');
+        const peerConnections = new Map();
+
+        async function init() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: true
+                });
+                localVideo.srcObject = stream;
+
+                // Connect to the SFU server
+                const peerConnection = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' }
+                    ]
+                });
+
+                stream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, stream);
+                });
+
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        socket.emit('ice-candidate', {
+                            candidate: event.candidate,
+                            targetId: socket.id
+                        });
+                    }
+                };
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                socket.emit('offer', { offer, targetId: socket.id });
+                socket.emit('join');
+
+            } catch (error) {
+                console.error('Error accessing media devices:', error);
+            }
+        }
+
+        socket.on('answer', async (data) => {
+            const { answer, targetId } = data;
+            const peerConnection = peerConnections.get(targetId);
+            if (peerConnection) {
+                await peerConnection.setRemoteDescription(answer);
+            }
+        });
+
+        socket.on('user-connected', async (peerId) => {
+            const peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' }
+                ]
+            });
+
+            peerConnections.set(peerId, peerConnection);
+
+            peerConnection.ontrack = (event) => {
+                const video = document.createElement('video');
+                video.id = `video-${peerId}`;
+                video.autoplay = true;
+                video.playsinline = true;
+                video.srcObject = event.streams[0];
+                videoContainer.appendChild(video);
+            };
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            socket.emit('offer', { offer, targetId: peerId });
+        });
+
+        socket.on('user-disconnected', (peerId) => {
+            const video = document.getElementById(`video-${peerId}`);
+            if (video) {
+                video.remove();
+            }
+            const peerConnection = peerConnections.get(peerId);
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnections.delete(peerId);
+            }
+        });
+
+        init();
+    </script>
+</body>
+</html>
